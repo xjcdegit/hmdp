@@ -4,7 +4,9 @@ import cn.hutool.core.bean.BeanUtil;
 import cn.hutool.core.bean.copier.CopyOptions;
 import cn.hutool.core.util.RandomUtil;
 import cn.hutool.json.JSONException;
+import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.toolkit.BeanUtils;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.github.qcloudsms.SmsSingleSender;
 import com.github.qcloudsms.SmsSingleSenderResult;
@@ -16,9 +18,10 @@ import com.hmdp.entity.User;
 import com.hmdp.mapper.UserMapper;
 import com.hmdp.service.IUserService;
 import com.hmdp.utils.RegexUtils;
+import com.hmdp.utils.UserHolder;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.connection.BitFieldSubCommands;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
@@ -26,7 +29,10 @@ import javax.annotation.Resource;
 import javax.jws.Oneway;
 import javax.servlet.http.HttpSession;
 import java.io.IOException;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
@@ -194,5 +200,87 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         //每一个session都会有一个sessionID，访问tomcat时，sessionID已经自动写到cokkie中，只有请求会带着sessionID，
         // 就可以找到session与其对应的user
         //return Result.ok();
+    }
+
+    /**
+     * 通过id访问用户主页
+     * @param
+     * @return
+     */
+    @Override
+    public Result queryUserById(Long userId) {
+        String userInRedis = stringRedisTemplate.opsForValue().get("user:" + userId);
+        if(null != userInRedis) {
+            UserDTO userDTO = JSONUtil.toBean(userInRedis,UserDTO.class);
+            return Result.ok(userDTO);
+        }
+            // 查询详情
+            User user = getById(userId);
+            if (user == null) {
+                return Result.ok();
+            }
+            UserDTO userDTO = BeanUtil.copyProperties(user, UserDTO.class);
+            stringRedisTemplate.opsForValue().set("user:" + userId, JSONUtil.toJsonStr(userDTO));
+
+        // 返回
+        return Result.ok(userDTO);
+    }
+
+    @Override
+    public Result sign() {
+        //获取用户
+        Long id = UserHolder.getUser().getId();
+        //获取日期
+        LocalDateTime now = LocalDateTime.now();
+        //拼接key
+        String keySuffix = now.format(DateTimeFormatter.ofPattern(":yyyyMM"));
+        String key = USER_SIGN_KEY + id + keySuffix;
+        //获取当前是本月的第几天(这里得到的为1~31，redis存入的以0开头，所以加入到redis时需要-1)
+        int day = now.getDayOfMonth();
+        //写入redis select key offset 1
+        stringRedisTemplate.opsForValue().setBit(key, day - 1, true);
+        return Result.ok();
+    }
+
+    @Override
+    public Result signCount() {
+        //1.获取用户
+        Long id = UserHolder.getUser().getId();
+        //2.获取日期
+        LocalDateTime now = LocalDateTime.now();
+        //3.拼接key
+        String keySuffix = now.format(DateTimeFormatter.ofPattern(":yyyyMM"));
+        String key = USER_SIGN_KEY + id + keySuffix;
+        //4.获取当前是本月的第几天(这里得到的为1~31，redis存入的以0开头，所以加入到redis时需要-1)
+        int day = now.getDayOfMonth();
+
+        //获取截至本日所有签到记录，返回一个十进制的数字 BITFIELD sign : 5:202203 GET ui4o
+        List<Long> result = stringRedisTemplate.opsForValue().bitField(
+                key,
+                BitFieldSubCommands.create()
+                        .get(BitFieldSubCommands.BitFieldType.unsigned(day)).valueAt(0)
+        );
+        if(result == null || result.isEmpty()){
+            return Result.ok(0);
+        }
+        Long num = result.get(0);
+        if(num == null || num == 0){
+            return Result.ok(0);
+        }
+        //6.虚幻遍历
+        int count = 0;//计数器
+        while(true) {
+            //6.1 让这个数字与1进行与运算，得到最后一次的bit位
+            if((num & 1) == 0){
+                //如果为0
+                break;
+            }else{
+                //如果不为0
+                count++;
+            }
+            //把数字右移一位
+            num >>>= 1;
+        }
+        return Result.ok(count);
     }
 }
